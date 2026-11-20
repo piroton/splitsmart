@@ -430,7 +430,10 @@ export function ApiDocs() {
         <p>
           The same rows and the same filters as above, as CSV: one row per
           expense, money as a decimal string with the currency in its own column.
-          Guests have their own link-scoped{" "}
+          When filtered by a <code>group_id</code> you actively belong to, all
+          live expenses in that group are included (matching{" "}
+          <code>GET /api/v1/groups/:id/expenses</code>), not only bills you are a
+          direct participant on. Guests have their own link-scoped{" "}
           <code>/api/v1/guest/expenses.csv</code>.
         </p>
       </Endpoint>

@@ -163,7 +163,9 @@ export function ExpenseFilters({
               onClick={() => {
                 setMenuOpen(false);
                 if (!db || !user) return;
-                void localExpenseCsv(db, user.id, { ...csvScope, ...value }).then((csv) => {
+                // Screen scope wins over user filters so a cleared filter key
+                // can never widen or drop the screen's group/friend scope.
+                void localExpenseCsv(db, user.id, { ...value, ...csvScope }).then((csv) => {
                   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
                   const anchor = document.createElement("a");
                   anchor.href = url;

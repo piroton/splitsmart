@@ -40,6 +40,7 @@ import {
 import {
   hasFilters,
   matchesFilters,
+  NO_GROUP,
   type ExpenseFilters,
 } from "../../../src/domain/expense-query.ts";
 import {
@@ -60,7 +61,7 @@ import type {
   GroupMember,
 } from "../api.ts";
 import type { LocalDb, LocalExpense, SyncUser } from "./local.ts";
-import { getMeta } from "./local.ts";
+import { getMeta, memberKey } from "./local.ts";
 import {
   cacheFromExpenses,
   loadFriendRecency,
@@ -1185,6 +1186,15 @@ export async function localComments(
   };
 }
 
+async function isActiveGroupMember(
+  db: LocalDb,
+  groupId: string,
+  userId: string,
+): Promise<boolean> {
+  const membership = await db.groupMembers.get(memberKey(groupId, userId));
+  return membership !== undefined && membership.leftAt === null;
+}
+
 /**
  * The CSV, built from the mirror.
  *
@@ -1192,13 +1202,28 @@ export async function localComments(
  * way, so the download is byte-identical whether or not the network was up. A
  * second formatter here would eventually disagree about quoting or about which
  * currency's decimals to use, and nobody would notice until a spreadsheet did.
+ *
+ * When scoped to a group the caller actively belongs to, gathers rows via
+ * `localGroupExpenses` so every live bill in that group is exported — including
+ * moved bills, payments between other members, bulk-added rows, guest entries,
+ * recurring occurrences, and imports where `selfId` is not in `shares`.
+ * Departed groups, non-group exports, and unscoped All-expenses downloads stay
+ * participant-only, matching `GET /api/v1/expenses.csv`.
  */
 export async function localExpenseCsv(
   db: LocalDb,
   selfId: string,
   query: ExpenseQuery = {},
 ): Promise<string> {
-  const { expenses } = await localExpenses(db, selfId, query);
+  const activeGroupId =
+    query.groupId &&
+    query.groupId !== NO_GROUP &&
+    (await isActiveGroupMember(db, query.groupId, selfId))
+      ? query.groupId
+      : null;
+  const { expenses } = activeGroupId
+    ? await localGroupExpenses(db, activeGroupId, query)
+    : await localExpenses(db, selfId, query);
   if (expenses.length === 0) return csvDocument([]);
 
   const byId = new Map((await db.expenses.bulkGet(expenses.map((e) => e.id))).map((e) => [e?.id, e]));
@@ -1207,11 +1232,11 @@ export async function localExpenseCsv(
 
   const rows: CsvExpenseRow[] = expenses.map((summary) => {
     const row = byId.get(summary.id);
-      const decimals = currencies.get(summary.currency_code);
-      if (decimals === undefined) {
-        throw new Error(`Unknown currency ${summary.currency_code}`);
-      }
-      return {
+    const decimals = currencies.get(summary.currency_code);
+    if (decimals === undefined) {
+      throw new Error(`Unknown currency ${summary.currency_code}`);
+    }
+    return {
       date: summary.date,
       description: summary.description,
       categoryName: summary.category_name,
@@ -1225,7 +1250,8 @@ export async function localExpenseCsv(
       repeatInterval: summary.repeat_interval ?? null,
       repeatOf: summary.repeat_of ?? null,
       people: summary.shares.map((share) => {
-        const user = users.get(share.user_id);
+        const user =
+          users.get(share.user_id) ?? row?.people?.find((person) => person.id === share.user_id);
         return {
           name: user ? displayName(user) : share.user_id,
           paidMinor: share.paid_share_minor,

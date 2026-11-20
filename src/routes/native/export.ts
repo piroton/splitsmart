@@ -20,7 +20,12 @@ import { db } from "../../db/index.ts";
 import { requireAuth, type AppEnv } from "../../auth/middleware.ts";
 import { buildExpenseCsv } from "../../domain/expense-csv.ts";
 import { buildExportZip } from "../../domain/export-archive.ts";
-import { expenseFilterWhere, hasFilters, parseExpenseFilters } from "./expense-filters.ts";
+import {
+  expenseFilterWhere,
+  hasFilters,
+  NO_GROUP,
+  parseExpenseFilters,
+} from "./expense-filters.ts";
 
 /**
  * NO `use("*", requireAuth)` HERE. This router is mounted at `/api/v1`, and a
@@ -48,18 +53,45 @@ export const exportRoutes = new Hono<AppEnv>()
   const auth = c.get("user");
   const filters = parseExpenseFilters(c.req.query());
 
-  let query = db
-    .selectFrom("expenses")
-    .innerJoin("expense_users", "expense_users.expense_id", "expenses.id")
-    .select("expenses.id")
-    .where("expense_users.user_id", "=", auth.id)
-    .where("expenses.deleted_at", "is", null)
-    .orderBy("expenses.date", "desc")
-    .limit(MAX_CSV_ROWS);
+  // When scoped to a specific group the caller actively belongs to, match
+  // `GET /api/v1/groups/:id/expenses`: include every live bill in that group,
+  // not only the ones the caller is a direct participant on (moved bills,
+  // other members' expenses/payments, bulk-added or imported rows, etc.).
+  // Non-members, former members (`left_at` set), and unscoped All-expenses
+  // downloads stay participant-only.
+  const activeGroupMember =
+    filters.groupId !== undefined && filters.groupId !== NO_GROUP
+      ? (await db
+          .selectFrom("group_members")
+          .select("user_id")
+          .where("group_id", "=", filters.groupId)
+          .where("user_id", "=", auth.id)
+          .where("left_at", "is", null)
+          .executeTakeFirst()) !== undefined
+      : false;
 
-  if (hasFilters(filters)) query = query.where(expenseFilterWhere(filters));
+  const rows = activeGroupMember
+    ? await db
+        .selectFrom("expenses")
+        .select("expenses.id")
+        .where("expenses.deleted_at", "is", null)
+        .$if(hasFilters(filters), (qb) => qb.where(expenseFilterWhere(filters)))
+        .orderBy("expenses.date", "desc")
+        .orderBy("expenses.id", "desc")
+        .limit(MAX_CSV_ROWS)
+        .execute()
+    : await db
+        .selectFrom("expenses")
+        .innerJoin("expense_users", "expense_users.expense_id", "expenses.id")
+        .select("expenses.id")
+        .where("expense_users.user_id", "=", auth.id)
+        .where("expenses.deleted_at", "is", null)
+        .$if(hasFilters(filters), (qb) => qb.where(expenseFilterWhere(filters)))
+        .orderBy("expenses.date", "desc")
+        .orderBy("expenses.id", "desc")
+        .limit(MAX_CSV_ROWS)
+        .execute();
 
-  const rows = await query.execute();
   const csv = await buildExpenseCsv(db, rows.map((r) => r.id));
 
   return csvResponse(c, csv, "splitsmart-expenses.csv");
